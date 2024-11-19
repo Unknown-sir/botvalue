@@ -1,0 +1,127 @@
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+import sqlite3
+
+# دریافت توکن و آیدی مدیر از فایل .env
+TOKEN = os.getenv("TOKEN_BOT")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+# اتصال به دیتابیس
+DB_FILE = "bot_database.db"
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# دستور شروع
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # ثبت یا شناسایی کاربر
+    cursor.execute("SELECT user_type FROM Users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    if not result:
+        if user_id == ADMIN_ID:
+            cursor.execute("INSERT INTO Users (user_id, user_type) VALUES (?, ?)", (user_id, "admin"))
+            conn.commit()
+            await update.message.reply_text("شما مدیر هستید. از دستورات مدیریتی استفاده کنید.")
+        else:
+            cursor.execute("INSERT INTO Users (user_id, user_type) VALUES (?, ?)", (user_id, "simple"))
+            conn.commit()
+            await update.message.reply_text("شما کاربر ساده هستید. از دکمه‌های شیشه‌ای استفاده کنید.")
+    else:
+        await update.message.reply_text("شما قبلاً ثبت شده‌اید.")
+
+# اضافه کردن آی‌پی
+async def add_ip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("شما اجازه این کار را ندارید!")
+        return
+
+    try:
+        ip, assigned_user_id, limit = context.args
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO Servers (ip, user_id, limit, used) VALUES (?, ?, ?, ?)", (ip, assigned_user_id, limit, 0))
+        conn.commit()
+        await update.message.reply_text("آی‌پی با موفقیت اضافه شد.")
+    except ValueError:
+        await update.message.reply_text("فرمت دستور صحیح نیست. مثال: /add_ip 192.168.1.1 123456789 1000")
+
+# مشاهده سرورها برای کاربر ساده
+async def view_servers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT ip FROM Servers WHERE user_id = ?", (user_id,))
+    ips = cursor.fetchall()
+
+    if not ips:
+        await update.message.reply_text("هیچ آی‌پی‌ای برای شما تخصیص داده نشده است.")
+        return
+
+    keyboard = [[InlineKeyboardButton(ip["ip"], callback_data=f"view_ip_{ip['ip']}")] for ip in ips]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("آی‌پی‌های تخصیص داده شده:", reply_markup=reply_markup)
+
+# نمایش جزئیات آی‌پی
+async def view_ip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    ip = query.data.split("_")[2]
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT limit, used FROM Servers WHERE ip = ?", (ip,))
+    result = cursor.fetchone()
+
+    if result:
+        limit, used = result["limit"], result["used"]
+        keyboard = [[InlineKeyboardButton("درخواست مقدار استفاده شده", callback_data=f"request_used_{ip}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text=f"آی‌پی: {ip}\nحجم کل: {limit} گیگابایت", reply_markup=reply_markup)
+    else:
+        await query.edit_message_text(text="آی‌پی یافت نشد.")
+
+# درخواست مقدار استفاده شده
+async def request_used(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    ip = query.data.split("_")[2]
+    user_id = query.from_user.id
+
+    await context.bot.send_message(chat_id=ADMIN_ID, text=f"کاربر با آیدی {user_id} درخواست مقدار استفاده شده برای آی‌پی {ip} را داده است.")
+    await query.edit_message_text(text="درخواست شما ارسال شد. منتظر پاسخ مدیر باشید.")
+
+# مدیر مقدار مصرف‌شده را تنظیم می‌کند
+async def set_used(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("شما اجازه این کار را ندارید!")
+        return
+
+    try:
+        ip, used = context.args
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE Servers SET used = ? WHERE ip = ?", (used, ip))
+        conn.commit()
+        await update.message.reply_text("مقدار استفاده شده با موفقیت به‌روزرسانی شد.")
+    except ValueError:
+        await update.message.reply_text("فرمت دستور صحیح نیست. مثال: /set_used 192.168.1.1 500")
+
+# تنظیمات ربات
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("add_ip", add_ip))
+app.add_handler(CommandHandler("set_used", set_used))
+app.add_handler(CommandHandler("view_servers", view_servers))
+app.add_handler(CallbackQueryHandler(view_ip, pattern="^view_ip_"))
+app.add_handler(CallbackQueryHandler(request_used, pattern="^request_used_"))
+
+if __name__ == "__main__":
+    print("ربات در حال اجرا است...")
+    app.run_polling()
